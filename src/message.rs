@@ -193,16 +193,57 @@ impl Serialize for Msg
             &Msg::Goodbye{ref details, ref reason} => (GOODBYE_ID, details, reason).serialize(serializer),
             &Msg::Error{ref typ, ref request, ref details, ref error, ref arguments, ref arguments_kw} => {
                 if arguments_kw.is_some() {
-                    (ERROR_ID, typ, request, details, error, arguments, arguments_kw).serialize(serializer)
+                    if arguments.is_some() {
+                        (
+                            ERROR_ID,
+                            typ,
+                            request,
+                            details,
+                            error,
+                            arguments,
+                            arguments_kw,
+                        )
+                            .serialize(serializer)
+                    } else {
+                        (
+                            ERROR_ID,
+                            typ,
+                            request,
+                            details,
+                            error,
+                            Vec::<Arg>::new(),
+                            arguments_kw,
+                        )
+                            .serialize(serializer)
+                    }
                 } else if arguments.is_some() {
                     (ERROR_ID, typ, request, details, error, arguments).serialize(serializer)
                 } else {
                     (ERROR_ID, typ, request, details, error).serialize(serializer)
                 }
-            },
-            &Msg::Publish{ref request, ref options, ref topic, ref arguments, ref arguments_kw} => {
+            }
+            Msg::Publish {
+                ref request,
+                ref options,
+                ref topic,
+                ref arguments,
+                ref arguments_kw,
+            } => {
                 if arguments_kw.is_some() {
-                    (PUBLISH_ID, request, options, topic, arguments, arguments_kw).serialize(serializer)
+                    if arguments.is_some() {
+                        (PUBLISH_ID, request, options, topic, arguments, arguments_kw)
+                            .serialize(serializer)
+                    } else {
+                        (
+                            PUBLISH_ID,
+                            request,
+                            options,
+                            topic,
+                            Vec::<Arg>::new(),
+                            arguments_kw,
+                        )
+                            .serialize(serializer)
+                    }
                 } else if arguments.is_some() {
                     (PUBLISH_ID, request, options, topic, arguments).serialize(serializer)
                 } else {
@@ -216,7 +257,27 @@ impl Serialize for Msg
             &Msg::Unsubscribed{ref request} => (UNSUBSCRIBED_ID, request).serialize(serializer),
             &Msg::Event{ref subscription, ref publication, ref details, ref arguments, ref arguments_kw} => {
                 if arguments_kw.is_some() {
-                    (EVENT_ID, subscription, publication, details, arguments, arguments_kw).serialize(serializer)
+                    if arguments.is_some() {
+                        (
+                            EVENT_ID,
+                            subscription,
+                            publication,
+                            details,
+                            arguments,
+                            arguments_kw,
+                        )
+                            .serialize(serializer)
+                    } else {
+                        (
+                            EVENT_ID,
+                            subscription,
+                            publication,
+                            details,
+                            Vec::<Arg>::new(),
+                            arguments_kw,
+                        )
+                            .serialize(serializer)
+                    }
                 } else if arguments.is_some() {
                     (EVENT_ID, subscription, publication, details, arguments).serialize(serializer)
                 } else {
@@ -225,7 +286,27 @@ impl Serialize for Msg
             },
             &Msg::Call{ref request, ref options, ref procedure, ref arguments, ref arguments_kw} => {
                 if arguments_kw.is_some() {
-                    (CALL_ID, request, options, procedure, arguments, arguments_kw).serialize(serializer)
+                    if arguments.is_some() {
+                        (
+                            CALL_ID,
+                            request,
+                            options,
+                            procedure,
+                            arguments,
+                            arguments_kw,
+                        )
+                            .serialize(serializer)
+                    } else {
+                        (
+                            CALL_ID,
+                            request,
+                            options,
+                            procedure,
+                            Vec::<Arg>::new(),
+                            arguments_kw,
+                        )
+                            .serialize(serializer)
+                    }
                 } else if arguments.is_some() {
                     (CALL_ID, request, options, procedure, arguments).serialize(serializer)
                 } else {
@@ -234,7 +315,12 @@ impl Serialize for Msg
             },
             &Msg::Result{ref request, ref details, ref arguments, ref arguments_kw} => {
                 if arguments_kw.is_some() {
-                    (RESULT_ID, request, details, arguments, arguments_kw).serialize(serializer)
+                    if arguments.is_some() {
+                        (RESULT_ID, request, details, arguments, arguments_kw).serialize(serializer)
+                    } else {
+                        (RESULT_ID, request, details, Vec::<Arg>::new(), arguments_kw)
+                            .serialize(serializer)
+                    }
                 } else if arguments.is_some() {
                     (RESULT_ID, request, details, arguments).serialize(serializer)
                 } else {
@@ -247,7 +333,27 @@ impl Serialize for Msg
             &Msg::Unregistered{ref request} => (UNREGISTERED_ID, request).serialize(serializer),
             &Msg::Invocation{ref request, ref registration, ref details, ref arguments, ref arguments_kw} => {
                 if arguments_kw.is_some() {
-                    (INVOCATION_ID, request, registration, details, arguments, arguments_kw).serialize(serializer)
+                    if arguments.is_some() {
+                        (
+                            INVOCATION_ID,
+                            request,
+                            registration,
+                            details,
+                            arguments,
+                            arguments_kw,
+                        )
+                            .serialize(serializer)
+                    } else {
+                        (
+                            INVOCATION_ID,
+                            request,
+                            registration,
+                            details,
+                            Vec::<Arg>::new(),
+                            arguments_kw,
+                        )
+                            .serialize(serializer)
+                    }
                 } else if arguments.is_some() {
                     (INVOCATION_ID, request, registration, details, arguments).serialize(serializer)
                 } else {

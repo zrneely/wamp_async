@@ -273,10 +273,13 @@ impl Core {
 
     /// Generates a new request_id and inserts it into the pending_requests
     fn create_request(&mut self) -> WampId {
-        let mut request: WampId = rand::random();
+        use rand::Rng;
+
+        const MAX_WAMP_ID: u64 = 9007199254740992;
+        let mut request: WampId = rand::thread_rng().gen_range(1, MAX_WAMP_ID);
         // Pick a unique request_id
         while self.pending_requests.insert(request) == false {
-            request = rand::random();
+            request = rand::thread_rng().gen_range(1, MAX_WAMP_ID);
         }
         request
     }   
