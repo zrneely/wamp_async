@@ -1,10 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use futures::FutureExt;
 
 use log::*;
 use tokio::sync::oneshot;
 use tokio::sync::{
-    mpsc, mpsc::error::TryRecvError, mpsc::UnboundedReceiver, mpsc::UnboundedSender,
+    mpsc, mpsc::UnboundedReceiver, mpsc::UnboundedSender,
 };
 use url::*;
 
@@ -25,6 +26,8 @@ pub struct ClientConfig {
     max_msg_size: u32,
     /// When using a secure transport, this option disables certificate validation
     ssl_verify: bool,
+    /// Additional WebSocket headers on establish connection
+    websocket_headers: HashMap<String, String>,
 }
 
 impl Default for ClientConfig {
@@ -55,6 +58,7 @@ impl Default for ClientConfig {
             serializers: vec![SerializerType::Json, SerializerType::MsgPack],
             max_msg_size: 0,
             ssl_verify: true,
+            websocket_headers: HashMap::new(),
         }
     }
 }
@@ -113,10 +117,18 @@ impl ClientConfig {
     pub fn get_ssl_verify(&self) -> bool {
         self.ssl_verify
     }
+
+    pub fn add_websocket_header(mut self, key: String, val: String) -> Self {
+        self.websocket_headers.insert(key, val);
+        self
+    }
+    pub fn get_websocket_headers(&self) -> &HashMap<String, String> {
+        &self.websocket_headers
+    }
 }
 
 /// Allows interaction as a client with a WAMP server
-pub struct Client {
+pub struct Client<'a> {
     /// Configuration struct used to customize the client
     config: ClientConfig,
     /// Generic transport
@@ -127,7 +139,7 @@ pub struct Client {
     /// Current Session ID
     session_id: Option<WampId>,
     /// Channel to send requests to the event loop
-    ctl_channel: UnboundedSender<Request>,
+    ctl_channel: UnboundedSender<Request<'a>>,
 }
 
 /// All the states a client can be in
@@ -140,7 +152,7 @@ pub enum ClientState {
     Disconnected(Result<(), WampError>),
 }
 
-impl Client {
+impl<'a> Client<'a> {
     /// Connects to a WAMP server using the specified protocol
     ///
     /// __Note__
@@ -156,8 +168,11 @@ impl Client {
         cfg: Option<ClientConfig>,
     ) -> Result<
         (
-            Self,
-            (GenericFuture, Option<UnboundedReceiver<GenericFuture>>),
+            Client<'a>,
+            (
+                GenericFuture<'a>,
+                Option<UnboundedReceiver<GenericFuture<'a>>>,
+            ),
         ),
         WampError,
     > {
@@ -198,8 +213,16 @@ impl Client {
         ))
     }
 
-    /// Attempts to join a realm and start a session with the server
-    pub async fn join_realm<T: AsRef<str>>(&mut self, realm: T) -> Result<(), WampError> {
+    /// Attempts to join a realm and start a session with the server.
+    ///
+    /// See [`join_realm_with_authentication`] method for more details.
+    async fn inner_join_realm(
+        &mut self,
+        realm: String,
+        authentication_methods: Vec<AuthenticationMethod>,
+        authentication_id: Option<String>,
+        on_challenge_handler: Option<AuthenticationChallengeHandler<'a>>,
+    ) -> Result<(), WampError> {
         // Make sure the event loop is ready to process requests
         if let ClientState::NoEventLoop = self.get_cur_status() {
             debug!("Called join_realm() before th event loop is ready... Waiting...");
@@ -217,20 +240,23 @@ impl Client {
         if self.session_id.is_some() {
             return Err(From::from(format!(
                 "join_realm('{}') : Client already joined to a realm",
-                realm.as_ref()
+                realm
             )));
         }
 
         // Send a request for the core to perform the action
         let (res_sender, res) = oneshot::channel();
         if let Err(e) = self.ctl_channel.send(Request::Join {
-            uri: realm.as_ref().to_string(),
+            uri: realm,
             roles: self.config.roles.clone(),
             agent_str: if self.config.agent.is_empty() {
                 Some(self.config.agent.clone())
             } else {
                 None
             },
+            authentication_methods,
+            authentication_id,
+            on_challenge_handler,
             res: res_sender,
         }) {
             return Err(From::from(format!(
@@ -261,6 +287,70 @@ impl Client {
         debug!("Connected with session_id {} !", session_id);
 
         Ok(())
+    }
+
+    /// Attempts to join a realm and start a session with the server.
+    ///
+    /// * `realm` - A name of the WAMP realm
+    pub async fn join_realm<T: Into<String>>(&mut self, realm: T) -> Result<(), WampError> {
+        self.inner_join_realm(realm.into(), vec![], None, None)
+            .await
+    }
+
+    /// Attempts to join a realm and start a session with the server.
+    ///
+    /// * `realm` - A name of the WAMP realm
+    /// * `authentication_methods` - A set of all the authentication methods the client will support
+    /// * `authentication_id` - An authentication ID (e.g. username) the client wishes to authenticate as.
+    ///   It is required for non-anynomous authentication methods.
+    /// * `on_challenge_handler` - An authentication handler function
+    ///
+    /// ```ignore
+    /// client
+    ///     .join_realm_with_authentication(
+    ///         "realm1",
+    ///         vec![wamp_async::AuthenticationMethod::Ticket],
+    ///         "username",
+    ///         |_authentication_method, _extra| async {
+    ///             Ok(wamp_async::AuthenticationChallengeResponse::with_signature(
+    ///                 "password".into(),
+    ///             ))
+    ///         },
+    ///     )
+    ///     .await?;
+    /// ```
+    pub async fn join_realm_with_authentication<
+        Realm,
+        AuthenticationId,
+        AuthenticationChallengeHandler,
+        AuthenticationChallengeHandlerResponse,
+    >(
+        &mut self,
+        realm: Realm,
+        authentication_methods: Vec<AuthenticationMethod>,
+        authentication_id: AuthenticationId,
+        on_challenge_handler: AuthenticationChallengeHandler,
+    ) -> Result<(), WampError>
+    where
+        Realm: Into<String>,
+        AuthenticationId: Into<String>,
+        AuthenticationChallengeHandler: Fn(AuthenticationMethod, WampDict) -> AuthenticationChallengeHandlerResponse
+            + Send
+            + Sync
+            + 'a,
+        AuthenticationChallengeHandlerResponse: std::future::Future<Output = Result<AuthenticationChallengeResponse, WampError>>
+            + Send
+            + 'a,
+    {
+        self.inner_join_realm(
+            realm.into(),
+            authentication_methods,
+            Some(authentication_id.into()),
+            Some(Box::new(move |authentication_method, extra| {
+                Box::pin(on_challenge_handler(authentication_method, extra))
+            })),
+        )
+        .await
     }
 
     /// Leaves the current realm and terminates the session with the server
@@ -366,8 +456,8 @@ impl Client {
     pub async fn publish<T: AsRef<str>>(
         &self,
         topic: T,
-        arguments: WampArgs,
-        arguments_kw: WampKwArgs,
+        arguments: Option<WampArgs>,
+        arguments_kw: Option<WampKwArgs>,
         acknowledge: bool,
     ) -> Result<Option<WampId>, WampError> {
         let mut options = WampDict::new();
@@ -414,8 +504,8 @@ impl Client {
     pub async fn register<T, F, Fut>(&self, uri: T, func_ptr: F) -> Result<WampId, WampError>
     where
         T: AsRef<str>,
-        F: Fn(WampArgs, WampKwArgs) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<(WampArgs, WampKwArgs), WampError>> + Send + 'static,
+        F: Fn(Option<WampArgs>, Option<WampKwArgs>) -> Fut + Send + Sync + 'a,
+        Fut: Future<Output = Result<(Option<WampArgs>, Option<WampKwArgs>), WampError>> + Send + 'a,
     {
         // Send the request
         let (res, result) = oneshot::channel();
@@ -473,9 +563,9 @@ impl Client {
     pub async fn call<T: AsRef<str>>(
         &self,
         uri: T,
-        arguments: WampArgs,
-        arguments_kw: WampKwArgs,
-    ) -> Result<(WampArgs, WampKwArgs), WampError> {
+        arguments: Option<WampArgs>,
+        arguments_kw: Option<WampKwArgs>,
+    ) -> Result<(Option<WampArgs>, Option<WampKwArgs>), WampError> {
         // Send the request
         let (res, result) = oneshot::channel();
         if let Err(e) = self.ctl_channel.send(Request::Call {
@@ -504,12 +594,12 @@ impl Client {
     /// Returns the current client status
     pub fn get_cur_status(&mut self) -> &ClientState {
         // Check to see if the status changed
-        let new_status = self.core_res.try_recv();
+        let new_status = self.core_res.recv().now_or_never();
         #[allow(clippy::match_wild_err_arm)]
         match new_status {
-            Ok(state) => self.set_next_status(state),
-            Err(TryRecvError::Empty) => &self.core_status,
-            Err(_) => panic!("The event loop died without sending a new status"),
+            Some(Some(state)) => self.set_next_status(state),
+            None => &self.core_status,
+            Some(None) => panic!("The event loop died without sending a new status"),
         }
     }
 

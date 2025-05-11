@@ -4,11 +4,12 @@ use std::future::Future;
 use std::hash::Hash;
 use std::num::NonZeroU64;
 use std::pin::Pin;
-
-use crate::error::*;
+use std::str::FromStr;
 
 use log::*;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+
+use crate::error::*;
 
 pub(crate) const DEFAULT_AGENT_STR: &str =
     concat!(env!("CARGO_PKG_NAME"), "_rs-", env!("CARGO_PKG_VERSION"));
@@ -53,14 +54,19 @@ pub type WampBool = bool;
 pub type WampDict = HashMap<String, Arg>;
 /// list: a list (array) where items can be of any type
 pub type WampList = Vec<Arg>;
+/// Arbitrary values supported by the serialization format in the payload
+///
+/// Implementation note: we currently use `serde_json::Value`, which is
+/// suboptimal when you want to use MsgPack and pass binary data.
+pub type WampPayloadValue = serde_json::Value;
 /// Unnamed WAMP argument list
-pub type WampArgs = Option<WampList>;
+pub type WampArgs = Vec<WampPayloadValue>;
 /// Named WAMP argument map
-pub type WampKwArgs = Option<WampDict>;
+pub type WampKwArgs = serde_json::Map<String, WampPayloadValue>;
 
 /// Generic enum that can hold any concrete WAMP value
-#[serde(untagged)]
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(untagged)]
 pub enum Arg {
     /// uri: a string URI as defined in URIs
     Uri(WampUri),
@@ -120,6 +126,134 @@ impl ServerRole {
     }
 }
 
+/// All the supported authentication methods WAMP-proto defines.
+///
+/// There is no special support currently built into wamp-async-rs, so
+/// "on challenge handler" will receive the raw challenge data as is, and
+/// it is required to reply with the correct [`AuthenticationChallengeResponse`].
+#[derive(Debug, Clone, strum::AsRefStr, strum::EnumString)]
+pub enum AuthenticationMethod {
+    /// No authentication challenge
+    #[strum(serialize = "anonymous")]
+    Anonymous,
+    /// [Challenge Response Authentication]
+    ///
+    /// [Challenge Response Authentication]: https://wamp-proto.org/_static/gen/wamp_latest.html#wampcra
+    #[strum(serialize = "wampcra")]
+    WampCra,
+    /// [Ticket-based Authentication]
+    ///
+    /// [Ticket-based Authentication]: https://wamp-proto.org/_static/gen/wamp_latest.html#ticketauth
+    #[strum(serialize = "ticket")]
+    Ticket,
+}
+
+impl Serialize for AuthenticationMethod {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_ref())
+    }
+}
+
+impl<'de> Deserialize<'de> for AuthenticationMethod {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Self::from_str(&s).map_err(|err| serde::de::Error::custom(err.to_string()))
+    }
+}
+
+/// This is what wamp-async-rs users are expected to return from `on_challenge_handler`
+/// during the authentication flow.
+///
+/// See also [`Self::with_signature`] shortcut, and
+/// [`crate::Client::join_realm_with_authentication`] for usage example.
+pub struct AuthenticationChallengeResponse {
+    pub signature: WampString,
+    pub extra: WampDict,
+}
+
+impl AuthenticationChallengeResponse {
+    /// This is a shortcut for a simple authentication flow like [Ticket-based Authentication].
+    ///
+    /// You may return a shared-secret as following:
+    ///
+    /// ```
+    /// # use wamp_async::AuthenticationChallengeResponse;
+    /// # fn test() -> AuthenticationChallengeResponse {
+    /// AuthenticationChallengeResponse::with_signature("shared-secret".into())
+    /// # }
+    /// ```
+    ///
+    /// [Ticket-based Authentication]: https://wamp-proto.org/_static/gen/wamp_latest.html#ticketauth
+    pub fn with_signature(signature: WampString) -> Self {
+        Self {
+            signature,
+            extra: WampDict::default(),
+        }
+    }
+}
+
+/// Convert WampPayloadValue into any serde-deserializable object
+pub fn try_from_any_value<'a, T: DeserializeOwned>(
+    value: WampPayloadValue,
+) -> Result<T, WampError> {
+    serde_json::from_value(value).map_err(|e| {
+        WampError::SerializationError(crate::serializer::SerializerError::Deserialization(
+            e.to_string(),
+        ))
+    })
+}
+
+/// Convert WampArgs into any serde-deserializable object
+pub fn try_from_args<'a, T: DeserializeOwned>(value: WampArgs) -> Result<T, WampError> {
+    try_from_any_value(value.into())
+}
+
+/// Convert WampArgs into any serde-deserializable object
+pub fn try_from_kwargs<'a, T: DeserializeOwned>(value: WampKwArgs) -> Result<T, WampError> {
+    try_from_any_value(value.into())
+}
+
+/// Convert any serde-serializable object into WampPayloadValue
+pub fn try_into_any_value<T: Serialize>(value: T) -> Result<WampPayloadValue, WampError> {
+    serde_json::to_value(value).map_err(|e| {
+        WampError::SerializationError(crate::serializer::SerializerError::Serialization(
+            e.to_string(),
+        ))
+    })
+}
+
+/// Convert any serde-serializable object into WampArgs
+pub fn try_into_args<T: Serialize>(value: T) -> Result<WampArgs, WampError> {
+    match serde_json::to_value(value).unwrap() {
+        serde_json::value::Value::Array(array) => Ok(array),
+        value => Err(WampError::SerializationError(
+            crate::serializer::SerializerError::Serialization(format!(
+                "failed to serialize {:?} into positional arguments",
+                value
+            )),
+        )),
+    }
+}
+
+/// Convert any serde-serializable object into WampKwArgs
+pub fn try_into_kwargs<T: Serialize>(value: T) -> Result<WampKwArgs, WampError> {
+    match serde_json::to_value(value).unwrap() {
+        serde_json::value::Value::Object(object) => Ok(object),
+        value => Err(WampError::SerializationError(
+            crate::serializer::SerializerError::Serialization(format!(
+                "failed to serialize {:?} into keyword arguments",
+                value
+            )),
+        )),
+    }
+}
+
 /// Returns whether a uri is valid or not (using strict rules)
 pub fn is_valid_strict_uri<T: AsRef<str>>(in_uri: T) -> bool {
     let uri: &str = in_uri.as_ref();
@@ -164,9 +298,32 @@ pub fn is_valid_strict_uri<T: AsRef<str>>(in_uri: T) -> bool {
 }
 
 /// Future that can return success or an error
-pub type GenericFuture = Pin<Box<dyn Future<Output = Result<(), WampError>> + Send>>;
+pub type GenericFuture<'a> = Pin<Box<dyn Future<Output = Result<(), WampError>> + Send + 'a>>;
 /// Type returned by RPC functions
-pub type RpcFuture =
-    Pin<Box<dyn Future<Output = Result<(WampArgs, WampKwArgs), WampError>> + Send>>;
+pub type RpcFuture<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<(Option<WampArgs>, Option<WampKwArgs>), WampError>>
+            + Send
+            + 'a,
+    >,
+>;
 /// Generic function that can receive RPC calls
-pub type RpcFunc = Box<dyn Fn(WampArgs, WampKwArgs) -> RpcFuture + Send + Sync>;
+pub type RpcFunc<'a> =
+    Box<dyn Fn(Option<WampArgs>, Option<WampKwArgs>) -> RpcFuture<'a> + Send + Sync + 'a>;
+
+/// Authentication Challenge function that should handle a CHALLENGE request during authentication flow.
+/// See more details in [`crate::Client::join_realm_with_authentication`]
+pub type AuthenticationChallengeHandler<'a> = Box<
+    dyn Fn(
+            AuthenticationMethod,
+            WampDict,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<AuthenticationChallengeResponse, WampError>>
+                    + Send
+                    + 'a,
+            >,
+        > + Send
+        + Sync
+        + 'a,
+>;

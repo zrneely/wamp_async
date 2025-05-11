@@ -33,9 +33,9 @@ pub type JoinResult = Sender<
     >,
 >;
 pub type SubscriptionQueue = UnboundedReceiver<(
-    WampId,   // Publish event ID
-    WampArgs, // Publish args
-    WampKwArgs,
+    WampId,           // Publish event ID
+    Option<WampArgs>, // Publish args
+    Option<WampKwArgs>,
 )>; // publish kwargs
 pub type PendingSubResult = Sender<
     Result<
@@ -55,14 +55,14 @@ pub type PendingRegisterResult = Sender<
 pub type PendingCallResult = Sender<
     Result<
         (
-            WampArgs,   // Return args
-            WampKwArgs, // Return kwargs
+            Option<WampArgs>,   // Return args
+            Option<WampKwArgs>, // Return kwargs
         ),
         WampError,
     >,
 >;
 
-pub struct Core {
+pub struct Core<'a> {
     /// Generic transport
     sock: Box<dyn Transport + Send>,
     valid_session: bool,
@@ -70,9 +70,9 @@ pub struct Core {
     /// Generic serializer
     serializer: Box<dyn SerializerImpl + Send>,
     /// Holds the request_id queues waiting for messages
-    ctl_sender: UnboundedSender<Request>,
+    ctl_sender: UnboundedSender<Request<'a>>,
     /// Channel for receiving client requests
-    ctl_channel: Option<UnboundedReceiver<Request>>, //Wrapped in option so we can give ownership to eventloop
+    ctl_channel: Option<UnboundedReceiver<Request<'a>>>, //Wrapped in option so we can give ownership to eventloop
 
     /// Holds set of pending requests
     pending_requests: HashSet<WampId>,
@@ -82,27 +82,27 @@ pub struct Core {
     /// Pending subscription requests sent to the server
     pending_sub: HashMap<WampId, PendingSubResult>,
     /// Current subscriptions
-    subscriptions: HashMap<WampId, UnboundedSender<(WampId, WampArgs, WampKwArgs)>>,
+    subscriptions: HashMap<WampId, UnboundedSender<(WampId, Option<WampArgs>, Option<WampKwArgs>)>>,
 
     /// Pending RPC registration requests sent to the server
-    pending_register: HashMap<WampId, (RpcFunc, PendingRegisterResult)>,
+    pending_register: HashMap<WampId, (RpcFunc<'a>, PendingRegisterResult)>,
     /// Currently registered RPC endpoints
-    rpc_endpoints: HashMap<WampId, RpcFunc>,
+    rpc_endpoints: HashMap<WampId, RpcFunc<'a>>,
     /// Queue passed back to the client caller to handle rpc events
-    pub rpc_event_queue_r: Option<UnboundedReceiver<GenericFuture>>,
-    rpc_event_queue_w: UnboundedSender<GenericFuture>,
+    pub rpc_event_queue_r: Option<UnboundedReceiver<GenericFuture<'a>>>,
+    rpc_event_queue_w: UnboundedSender<GenericFuture<'a>>,
 
     pending_call: HashMap<WampId, PendingCallResult>,
 }
 
-impl Core {
+impl<'a> Core<'a> {
     /// Establishes a connection with a WAMP server
     pub async fn connect(
         uri: &url::Url,
         cfg: &client::ClientConfig,
-        ctl_channel: (UnboundedSender<Request>, UnboundedReceiver<Request>),
+        ctl_channel: (UnboundedSender<Request<'a>>, UnboundedReceiver<Request<'a>>),
         core_res: UnboundedSender<Result<(), WampError>>,
-    ) -> Result<Self, WampError> {
+    ) -> Result<Core<'a>, WampError> {
         // Connect to the router using the requested transport
         let (sock, serializer_type) = match uri.scheme() {
             "ws" | "wss" => ws::connect(uri, &cfg).await?,
@@ -210,7 +210,10 @@ impl Core {
     }
 
     /// Handles unsolicited messages from the peer (events, rpc calls, etc...)
-    async fn handle_peer_msg(&mut self, msg: Msg) -> Status {
+    async fn handle_peer_msg<'b>(&'b mut self, msg: Msg) -> Status
+    where
+        'a: 'b,
+    {
         // Make sure we were expecting this message if it has a request ID
         if let Some(ref request) = msg.request_id() {
             if !self.pending_requests.remove(request) {
@@ -291,7 +294,7 @@ impl Core {
     }
 
     /// Handles the basic ways one can interact with the peer
-    async fn handle_local_request(&mut self, req: Request) -> Status {
+    async fn handle_local_request(&mut self, req: Request<'a>) -> Status {
         // Forward the request the the implementor
         match req {
             Request::Shutdown => Status::Shutdown,
@@ -299,8 +302,23 @@ impl Core {
                 uri,
                 roles,
                 agent_str,
+                authentication_methods,
+                authentication_id,
+                on_challenge_handler,
                 res,
-            } => send::join_realm(self, uri, roles, agent_str, res).await,
+            } => {
+                send::join_realm(
+                    self,
+                    uri,
+                    roles,
+                    agent_str,
+                    authentication_methods,
+                    authentication_id,
+                    on_challenge_handler,
+                    res,
+                )
+                .await
+            }
             Request::Leave { res } => send::leave_realm(self, res).await,
             Request::Subscribe { uri, res } => send::subscribe(self, uri, res).await,
             Request::Unsubscribe { sub_id, res } => send::unsubscribe(self, sub_id, res).await,
@@ -345,7 +363,10 @@ impl Core {
     }
 
     /// Receives a message and deserializes it
-    pub async fn recv(&mut self) -> Result<Msg, WampError> {
+    pub async fn recv<'b>(&'b mut self) -> Result<Msg, WampError>
+    where
+        'a: 'b,
+    {
         // Receive a full message from the host
         let payload = self.sock.recv().await?;
 

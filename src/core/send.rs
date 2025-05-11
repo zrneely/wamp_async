@@ -8,12 +8,15 @@ use crate::core::*;
 use crate::message::*;
 
 pub type JoinRealmResult = Result<(WampId, HashMap<WampString, Arg>), WampError>;
-pub enum Request {
+pub enum Request<'a> {
     Shutdown,
     Join {
         uri: WampString,
         roles: HashSet<ClientRole>,
         agent_str: Option<WampString>,
+        authentication_methods: Vec<AuthenticationMethod>,
+        authentication_id: Option<WampString>,
+        on_challenge_handler: Option<AuthenticationChallengeHandler<'a>>,
         res: Sender<JoinRealmResult>,
     },
     Leave {
@@ -30,14 +33,14 @@ pub enum Request {
     Publish {
         uri: WampString,
         options: WampDict,
-        arguments: WampArgs,
-        arguments_kw: WampKwArgs,
+        arguments: Option<WampArgs>,
+        arguments_kw: Option<WampKwArgs>,
         res: Sender<Result<Option<WampId>, WampError>>,
     },
     Register {
         uri: WampString,
         res: PendingRegisterResult,
-        func_ptr: RpcFunc,
+        func_ptr: RpcFunc<'a>,
     },
     Unregister {
         rpc_id: WampId,
@@ -45,23 +48,26 @@ pub enum Request {
     },
     InvocationResult {
         request: WampId,
-        res: Result<(WampArgs, WampKwArgs), WampError>,
+        res: Result<(Option<WampArgs>, Option<WampKwArgs>), WampError>,
     },
     Call {
         uri: WampString,
         options: WampDict,
-        arguments: WampArgs,
-        arguments_kw: WampKwArgs,
+        arguments: Option<WampArgs>,
+        arguments_kw: Option<WampKwArgs>,
         res: PendingCallResult,
     },
 }
 
 /// Handler for any join realm request. This will send a HELLO and wait for the WELCOME response
 pub async fn join_realm(
-    core: &mut Core,
+    core: &mut Core<'_>,
     uri: WampString,
     roles: HashSet<ClientRole>,
-    mut agent_str: Option<WampString>,
+    agent_str: Option<WampString>,
+    authentication_methods: Vec<AuthenticationMethod>,
+    authid: Option<WampString>,
+    on_challenge_handler: Option<AuthenticationChallengeHandler<'_>>,
     res: JoinResult,
 ) -> Status {
     let mut details: WampDict = WampDict::new();
@@ -72,8 +78,26 @@ pub async fn join_realm(
     }
     details.insert("roles".to_owned(), Arg::Dict(client_roles));
 
-    if let Some(agent) = agent_str.take() {
+    if let Some(agent) = agent_str {
         details.insert("agent".to_owned(), Arg::String(agent));
+    }
+
+    if !authentication_methods.is_empty() {
+        details.insert(
+            "authmethods".to_owned(),
+            Arg::List(
+                authentication_methods
+                    .iter()
+                    .map(|authentication_method| {
+                        Arg::String(authentication_method.as_ref().to_owned())
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        );
+    }
+
+    if let Some(authid) = authid {
+        details.insert("authid".to_owned(), Arg::String(authid));
     }
 
     // Send hello with our info
@@ -88,24 +112,51 @@ pub async fn join_realm(
         return Status::Shutdown;
     }
 
-    // Receive the WELCOME message
-    let resp = match core.recv().await {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = res.send(Err(e));
-            return Status::Shutdown;
-        }
-    };
-
     // Make sure the server responded with the proper message
-    let (session_id, server_roles) = match resp {
-        Msg::Welcome { session, details } => (session, details),
-        m => {
-            let _ = res.send(Err(From::from(format!(
-                "Server did not respond with WELCOME : {:?}",
-                m
-            ))));
-            return Status::Shutdown;
+    let (session_id, server_roles) = loop {
+        // Receive the response to the HELLO message (either WELCOME or CHALLENGE are expected)
+        let resp = match core.recv().await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = res.send(Err(e));
+                return Status::Shutdown;
+            }
+        };
+
+        match resp {
+            Msg::Welcome { session, details } => break (session, details),
+            Msg::Challenge {
+                authentication_method,
+                extra,
+            } => {
+                if let Some(ref on_challenge_handler) = on_challenge_handler {
+                    match on_challenge_handler(authentication_method, extra).await {
+                        Ok(AuthenticationChallengeResponse { signature, extra }) => {
+                            if let Err(e) = core.send(&Msg::Authenticate { signature, extra }).await
+                            {
+                                let _ = res.send(Err(e));
+                                return Status::Shutdown;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = res.send(Err(e));
+                            return Status::Shutdown;
+                        }
+                    }
+                } else {
+                    let _ = res.send(Err(From::from(
+                        "Server requested a CHALLENGE to authenticate, but there was no challenge handler provided".to_string()
+                    )));
+                    return Status::Shutdown;
+                }
+            }
+            m => {
+                let _ = res.send(Err(From::from(format!(
+                    "Server did not respond with WELCOME : {:?}",
+                    m
+                ))));
+                return Status::Shutdown;
+            }
         }
     };
 
@@ -117,7 +168,7 @@ pub async fn join_realm(
 }
 
 /// Handler for any leave realm request. This function will send a GOODBYE and wait for a GOODBYE response
-pub async fn leave_realm(core: &mut Core, res: Sender<Result<(), WampError>>) -> Status {
+pub async fn leave_realm(core: &mut Core<'_>, res: Sender<Result<(), WampError>>) -> Status {
     core.valid_session = false;
 
     if let Err(e) = core
@@ -136,7 +187,7 @@ pub async fn leave_realm(core: &mut Core, res: Sender<Result<(), WampError>>) ->
     Status::Ok
 }
 
-pub async fn subscribe(core: &mut Core, topic: WampString, res: PendingSubResult) -> Status {
+pub async fn subscribe(core: &mut Core<'_>, topic: WampString, res: PendingSubResult) -> Status {
     let request = core.create_request();
 
     if let Err(e) = core
@@ -158,7 +209,7 @@ pub async fn subscribe(core: &mut Core, topic: WampString, res: PendingSubResult
 }
 
 pub async fn unsubscribe(
-    core: &mut Core,
+    core: &mut Core<'_>,
     sub_id: WampId,
     res: Sender<Result<Option<WampId>, WampError>>,
 ) -> Status {
@@ -193,11 +244,11 @@ pub async fn unsubscribe(
 }
 
 pub async fn publish(
-    core: &mut Core,
+    core: &mut Core<'_>,
     uri: WampString,
     options: WampDict,
-    arguments: WampArgs,
-    arguments_kw: WampKwArgs,
+    arguments: Option<WampArgs>,
+    arguments_kw: Option<WampKwArgs>,
     res: Sender<Result<Option<WampId>, WampError>>,
 ) -> Status {
     let request = core.create_request();
@@ -222,11 +273,11 @@ pub async fn publish(
     Status::Ok
 }
 
-pub async fn register(
-    core: &mut Core,
+pub async fn register<'a>(
+    core: &mut Core<'a>,
     uri: WampString,
     res: PendingRegisterResult,
-    func_ptr: RpcFunc,
+    func_ptr: RpcFunc<'a>,
 ) -> Status {
     let request = core.create_request();
 
@@ -248,7 +299,7 @@ pub async fn register(
 }
 
 pub async fn unregister(
-    core: &mut Core,
+    core: &mut Core<'_>,
     rpc_id: WampId,
     res: Sender<Result<Option<WampId>, WampError>>,
 ) -> Status {
@@ -283,9 +334,9 @@ pub async fn unregister(
 }
 
 pub async fn invoke_yield(
-    core: &mut Core,
+    core: &mut Core<'_>,
     request: WampId,
-    res: Result<(WampArgs, WampKwArgs), WampError>,
+    res: Result<(Option<WampArgs>, Option<WampKwArgs>), WampError>,
 ) -> Status {
     let msg: Msg = match res {
         Ok((arguments, arguments_kw)) => Msg::Yield {
@@ -299,7 +350,7 @@ pub async fn invoke_yield(
             request,
             details: WampDict::new(),
             error: "wamp.async.rs.rpc.failed".to_string(),
-            arguments: Some(vec![Arg::String(format!("{:?}", e))]),
+            arguments: Some(vec![format!("{:?}", e).into()]),
             arguments_kw: None,
         },
     };
@@ -311,11 +362,11 @@ pub async fn invoke_yield(
 }
 
 pub async fn call(
-    core: &mut Core,
+    core: &mut Core<'_>,
     uri: WampString,
     options: WampDict,
-    arguments: WampArgs,
-    arguments_kw: WampKwArgs,
+    arguments: Option<WampArgs>,
+    arguments_kw: Option<WampKwArgs>,
     res: PendingCallResult,
 ) -> Status {
     let request = core.create_request();

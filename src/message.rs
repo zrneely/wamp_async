@@ -10,6 +10,8 @@ use crate::common::*;
 pub const HELLO_ID: WampInteger = 1;
 pub const WELCOME_ID: WampInteger = 2;
 pub const ABORT_ID: WampInteger = 3;
+pub const CHALLENGE_ID: WampInteger = 4;
+pub const AUTHENTICATE_ID: WampInteger = 5;
 pub const GOODBYE_ID: WampInteger = 6;
 pub const ERROR_ID: WampInteger = 8;
 pub const PUBLISH_ID: WampInteger = 16;
@@ -35,8 +37,18 @@ pub enum Msg {
     Hello { realm: WampUri, details: WampDict },
     /// Sent by a Router to accept a Client. The WAMP session is now open.
     Welcome { session: WampId, details: WampDict },
-    /// Sent by a Peer*to abort the opening of a WAMP session. No response is expected.
+    /// Sent by a Peer to abort the opening of a WAMP session. No response is expected.
     Abort { details: WampDict, reason: WampUri },
+    /// Sent by a Router to challenge a Client for authentication. Authenticate response is expected
+    Challenge {
+        authentication_method: AuthenticationMethod,
+        extra: WampDict,
+    },
+    /// Sent by a Peer to authenticate a Client in response to Challenge request from Router.
+    Authenticate {
+        signature: WampString,
+        extra: WampDict,
+    },
     /// Sent by a Peer to close a previously opened WAMP session. Must be echo'ed by the receiving Peer.
     Goodbye { details: WampDict, reason: WampUri },
     /// Error reply sent by a Peer as an error response to different kinds of requests.
@@ -45,16 +57,16 @@ pub enum Msg {
         request: WampId,
         details: WampDict,
         error: WampUri,
-        arguments: Option<WampList>,
-        arguments_kw: Option<WampDict>,
+        arguments: Option<WampArgs>,
+        arguments_kw: Option<WampKwArgs>,
     },
     /// Sent by a Publisher to a Broker to publish an event.
     Publish {
         request: WampId,
         options: WampDict,
         topic: WampUri,
-        arguments: Option<WampList>,
-        arguments_kw: Option<WampDict>,
+        arguments: Option<WampArgs>,
+        arguments_kw: Option<WampKwArgs>,
     },
     /// Acknowledge sent by a Broker to a Publisher for acknowledged publications.
     Published {
@@ -84,23 +96,23 @@ pub enum Msg {
         subscription: WampId,
         publication: WampId,
         details: WampDict,
-        arguments: Option<WampList>,
-        arguments_kw: Option<WampDict>,
+        arguments: Option<WampArgs>,
+        arguments_kw: Option<WampKwArgs>,
     },
     /// Call as originally issued by the Caller to the Dealer.
     Call {
         request: WampId,
         options: WampDict,
         procedure: WampUri,
-        arguments: Option<WampList>,
-        arguments_kw: Option<WampDict>,
+        arguments: Option<WampArgs>,
+        arguments_kw: Option<WampKwArgs>,
     },
     /// Result of a call as returned by Dealer to Caller.
     Result {
         request: WampId,
         details: WampDict,
-        arguments: Option<WampList>,
-        arguments_kw: Option<WampDict>,
+        arguments: Option<WampArgs>,
+        arguments_kw: Option<WampKwArgs>,
     },
     /// A Callees request to register an endpoint at a Dealer.
     Register {
@@ -125,15 +137,15 @@ pub enum Msg {
         request: WampId,
         registration: WampId,
         details: WampDict,
-        arguments: Option<WampList>,
-        arguments_kw: Option<WampDict>,
+        arguments: Option<WampArgs>,
+        arguments_kw: Option<WampKwArgs>,
     },
     /// Actual yield from an endpoint sent by a Callee to Dealer.
     Yield {
         request: WampId,
         options: WampDict,
-        arguments: Option<WampList>,
-        arguments_kw: Option<WampDict>,
+        arguments: Option<WampArgs>,
+        arguments_kw: Option<WampKwArgs>,
     },
 }
 
@@ -157,6 +169,8 @@ impl Msg {
             Msg::Hello { .. }
             | Msg::Welcome { .. }
             | Msg::Abort { .. }
+            | Msg::Challenge { .. }
+            | Msg::Authenticate { .. }
             | Msg::Goodbye { .. }
             | Msg::Event { .. }
             | Msg::Invocation { .. } => return None,
@@ -187,6 +201,14 @@ impl Serialize for Msg {
                 ref details,
                 ref reason,
             } => (ABORT_ID, details, reason).serialize(serializer),
+            Msg::Challenge {
+                ref authentication_method,
+                ref extra,
+            } => (CHALLENGE_ID, authentication_method, extra).serialize(serializer),
+            Msg::Authenticate {
+                ref signature,
+                ref extra,
+            } => (AUTHENTICATE_ID, signature, extra).serialize(serializer),
             Msg::Goodbye {
                 ref details,
                 ref reason,
@@ -199,31 +221,18 @@ impl Serialize for Msg {
                 ref arguments,
                 ref arguments_kw,
             } => {
-                if arguments_kw.is_some() {
-                    if arguments.is_some() {
-                        (
-                            ERROR_ID,
-                            typ,
-                            request,
-                            details,
-                            error,
-                            arguments,
-                            arguments_kw,
-                        )
-                            .serialize(serializer)
-                    } else {
-                        (
-                            ERROR_ID,
-                            typ,
-                            request,
-                            details,
-                            error,
-                            Vec::<Arg>::new(),
-                            arguments_kw,
-                        )
-                            .serialize(serializer)
-                    }
-                } else if arguments.is_some() {
+                if let Some(arguments_kw) = arguments_kw {
+                    (
+                        ERROR_ID,
+                        typ,
+                        request,
+                        details,
+                        error,
+                        arguments.as_ref().unwrap_or(&WampArgs::new()),
+                        arguments_kw,
+                    )
+                        .serialize(serializer)
+                } else if let Some(arguments) = arguments {
                     (ERROR_ID, typ, request, details, error, arguments).serialize(serializer)
                 } else {
                     (ERROR_ID, typ, request, details, error).serialize(serializer)
@@ -236,22 +245,17 @@ impl Serialize for Msg {
                 ref arguments,
                 ref arguments_kw,
             } => {
-                if arguments_kw.is_some() {
-                    if arguments.is_some() {
-                        (PUBLISH_ID, request, options, topic, arguments, arguments_kw)
-                            .serialize(serializer)
-                    } else {
-                        (
-                            PUBLISH_ID,
-                            request,
-                            options,
-                            topic,
-                            Vec::<Arg>::new(),
-                            arguments_kw,
-                        )
-                            .serialize(serializer)
-                    }
-                } else if arguments.is_some() {
+                if let Some(arguments_kw) = arguments_kw {
+                    (
+                        PUBLISH_ID,
+                        request,
+                        options,
+                        topic,
+                        arguments.as_ref().unwrap_or(&WampArgs::new()),
+                        arguments_kw
+                    )
+                        .serialize(serializer)
+                } else if let Some(arguments) = arguments {
                     (PUBLISH_ID, request, options, topic, arguments).serialize(serializer)
                 } else {
                     (PUBLISH_ID, request, options, topic).serialize(serializer)
@@ -282,29 +286,17 @@ impl Serialize for Msg {
                 ref arguments,
                 ref arguments_kw,
             } => {
-                if arguments_kw.is_some() {
-                    if arguments.is_some() {
-                        (
-                            EVENT_ID,
-                            subscription,
-                            publication,
-                            details,
-                            arguments,
-                            arguments_kw,
-                        )
-                            .serialize(serializer)
-                    } else {
-                        (
-                            EVENT_ID,
-                            subscription,
-                            publication,
-                            details,
-                            Vec::<Arg>::new(),
-                            arguments_kw,
-                        )
-                            .serialize(serializer)
-                    }
-                } else if arguments.is_some() {
+                if let Some(arguments_kw) = arguments_kw {
+                    (
+                        EVENT_ID,
+                        subscription,
+                        publication,
+                        details,
+                        arguments.as_ref().unwrap_or(&WampArgs::new()),
+                        arguments_kw,
+                    )
+                        .serialize(serializer)
+                } else if let Some(arguments) = arguments {
                     (EVENT_ID, subscription, publication, details, arguments).serialize(serializer)
                 } else {
                     (EVENT_ID, subscription, publication, details).serialize(serializer)
@@ -317,29 +309,17 @@ impl Serialize for Msg {
                 ref arguments,
                 ref arguments_kw,
             } => {
-                if arguments_kw.is_some() {
-                    if arguments.is_some() {
-                        (
-                            CALL_ID,
-                            request,
-                            options,
-                            procedure,
-                            arguments,
-                            arguments_kw,
-                        )
-                            .serialize(serializer)
-                    } else {
-                        (
-                            CALL_ID,
-                            request,
-                            options,
-                            procedure,
-                            Vec::<Arg>::new(),
-                            arguments_kw,
-                        )
-                            .serialize(serializer)
-                    }
-                } else if arguments.is_some() {
+                if let Some(arguments_kw) = arguments_kw {
+                    (
+                        CALL_ID,
+                        request,
+                        options,
+                        procedure,
+                        arguments.as_ref().unwrap_or(&WampArgs::new()),
+                        arguments_kw,
+                    )
+                        .serialize(serializer)
+                } else if let Some(arguments) = arguments {
                     (CALL_ID, request, options, procedure, arguments).serialize(serializer)
                 } else {
                     (CALL_ID, request, options, procedure).serialize(serializer)
@@ -351,14 +331,16 @@ impl Serialize for Msg {
                 ref arguments,
                 ref arguments_kw,
             } => {
-                if arguments_kw.is_some() {
-                    if arguments.is_some() {
-                        (RESULT_ID, request, details, arguments, arguments_kw).serialize(serializer)
-                    } else {
-                        (RESULT_ID, request, details, Vec::<Arg>::new(), arguments_kw)
-                            .serialize(serializer)
-                    }
-                } else if arguments.is_some() {
+                if let Some(arguments_kw) = arguments_kw {
+                    (
+                        RESULT_ID,
+                        request,
+                        details,
+                        arguments.as_ref().unwrap_or(&WampArgs::new()),
+                        arguments_kw
+                    )
+                        .serialize(serializer)
+                } else if let Some(arguments) = arguments {
                     (RESULT_ID, request, details, arguments).serialize(serializer)
                 } else {
                     (RESULT_ID, request, details).serialize(serializer)
@@ -385,29 +367,17 @@ impl Serialize for Msg {
                 ref arguments,
                 ref arguments_kw,
             } => {
-                if arguments_kw.is_some() {
-                    if arguments.is_some() {
-                        (
-                            INVOCATION_ID,
-                            request,
-                            registration,
-                            details,
-                            arguments,
-                            arguments_kw,
-                        )
-                            .serialize(serializer)
-                    } else {
-                        (
-                            INVOCATION_ID,
-                            request,
-                            registration,
-                            details,
-                            Vec::<Arg>::new(),
-                            arguments_kw,
-                        )
-                            .serialize(serializer)
-                    }
-                } else if arguments.is_some() {
+                if let Some(arguments_kw) = arguments_kw {
+                    (
+                        INVOCATION_ID,
+                        request,
+                        registration,
+                        details,
+                        arguments.as_ref().unwrap_or(&WampArgs::new()),
+                        arguments_kw,
+                    )
+                        .serialize(serializer)
+                } else if let Some(arguments) = arguments {
                     (INVOCATION_ID, request, registration, details, arguments).serialize(serializer)
                 } else {
                     (INVOCATION_ID, request, registration, details).serialize(serializer)
@@ -419,9 +389,16 @@ impl Serialize for Msg {
                 ref arguments,
                 ref arguments_kw,
             } => {
-                if arguments_kw.is_some() {
-                    (YIELD_ID, request, options, arguments, arguments_kw).serialize(serializer)
-                } else if arguments.is_some() {
+                if let Some(arguments_kw) = arguments_kw {
+                    (
+                        YIELD_ID,
+                        request,
+                        options,
+                        arguments.as_ref().unwrap_or(&WampArgs::new()),
+                        arguments_kw
+                    )
+                        .serialize(serializer)
+                } else if let Some(arguments) = arguments {
                     (YIELD_ID, request, options, arguments).serialize(serializer)
                 } else {
                     (YIELD_ID, request, options).serialize(serializer)
@@ -467,6 +444,26 @@ impl<'de> Deserialize<'de> for Msg {
                     reason: v
                         .next_element()?
                         .ok_or_else(|| Error::missing_field("reason"))?,
+                })
+            }
+            fn de_challenge<'de, V: SeqAccess<'de>>(&self, mut v: V) -> Result<Msg, V::Error> {
+                Ok(Msg::Challenge {
+                    authentication_method: v
+                        .next_element()?
+                        .ok_or_else(|| Error::missing_field("authmethod"))?,
+                    extra: v
+                        .next_element()?
+                        .ok_or_else(|| Error::missing_field("extra"))?,
+                })
+            }
+            fn de_authenticate<'de, V: SeqAccess<'de>>(&self, mut v: V) -> Result<Msg, V::Error> {
+                Ok(Msg::Authenticate {
+                    signature: v
+                        .next_element()?
+                        .ok_or_else(|| Error::missing_field("signature"))?,
+                    extra: v
+                        .next_element()?
+                        .ok_or_else(|| Error::missing_field("extra"))?,
                 })
             }
             fn de_goodbye<'de, V: SeqAccess<'de>>(&self, mut v: V) -> Result<Msg, V::Error> {
@@ -691,6 +688,8 @@ impl<'de> Deserialize<'de> for Msg {
                     HELLO_ID => self.de_hello(v),
                     WELCOME_ID => self.de_welcome(v),
                     ABORT_ID => self.de_abort(v),
+                    CHALLENGE_ID => self.de_challenge(v),
+                    AUTHENTICATE_ID => self.de_authenticate(v),
                     GOODBYE_ID => self.de_goodbye(v),
                     ERROR_ID => self.de_error(v),
                     PUBLISH_ID => self.de_publish(v),
