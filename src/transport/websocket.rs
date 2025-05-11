@@ -23,11 +23,11 @@ impl Transport for WsCtx {
     async fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
         trace!("Send[0x{:X}] : {:?}", data.len(), data);
         let res = if self.is_bin {
-            self.client.send(Message::Binary(Vec::from(data))).await
+            self.client.send(Message::Binary(Vec::from(data).into())).await
         } else {
             let str_payload = std::str::from_utf8(data).unwrap().to_owned();
             trace!("Text('{}')", str_payload);
-            self.client.send(Message::Text(str_payload)).await
+            self.client.send(Message::Text(str_payload.into())).await
         };
 
         if let Err(e) = res {
@@ -66,7 +66,7 @@ impl Transport for WsCtx {
                         error!("Got websocket Binary message but only Text is allowed");
                         return Err(TransportError::UnexpectedResponse);
                     }
-                    b
+                    b.into()
                 }
                 Message::Ping(d) => {
                     if let Err(e) = self.client.send(Message::Pong(d)).await {
