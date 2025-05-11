@@ -1,12 +1,10 @@
+use futures::FutureExt;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use futures::FutureExt;
 
 use log::*;
 use tokio::sync::oneshot;
-use tokio::sync::{
-    mpsc, mpsc::UnboundedReceiver, mpsc::UnboundedSender,
-};
+use tokio::sync::{mpsc, mpsc::UnboundedReceiver, mpsc::UnboundedSender};
 use url::*;
 
 pub use crate::common::*;
@@ -181,11 +179,7 @@ impl<'a> Client<'a> {
             Err(e) => return Err(WampError::InvalidUri(e)),
         };
 
-        let config = match cfg {
-            Some(c) => c,
-            // Set defaults
-            None => ClientConfig::default(),
-        };
+        let config = cfg.unwrap_or_default();
 
         let (ctl_channel, ctl_receiver) = mpsc::unbounded_channel();
         let (core_res_w, core_res) = mpsc::unbounded_channel();
@@ -605,10 +599,7 @@ impl<'a> Client<'a> {
 
     /// Returns whether we are connected to the server or not
     pub fn is_connected(&mut self) -> bool {
-        match self.get_cur_status() {
-            ClientState::Running => true,
-            _ => false,
-        }
+        matches!(self.get_cur_status(), ClientState::Running)
     }
 
     fn set_next_status(&mut self, new_status: Result<(), WampError>) -> &ClientState {

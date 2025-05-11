@@ -23,7 +23,9 @@ impl Transport for WsCtx {
     async fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
         trace!("Send[0x{:X}] : {:?}", data.len(), data);
         let res = if self.is_bin {
-            self.client.send(Message::Binary(Vec::from(data).into())).await
+            self.client
+                .send(Message::Binary(Vec::from(data).into()))
+                .await
         } else {
             let str_payload = std::str::from_utf8(data).unwrap().to_owned();
             trace!("Text('{}')", str_payload);
@@ -88,9 +90,7 @@ impl Transport for WsCtx {
     }
 
     async fn close(&mut self) {
-        match self.client.close(None) {
-            _ => { /*ignore result*/ }
-        };
+        let _ = self.client.close(None).await;
     }
 }
 
@@ -175,10 +175,7 @@ pub async fn connect(
 
     Ok((
         Box::new(WsCtx {
-            is_bin: match picked_serializer {
-                SerializerType::MsgPack => true,
-                _ => false,
-            },
+            is_bin: matches!(picked_serializer, SerializerType::MsgPack),
             client,
         }),
         picked_serializer,

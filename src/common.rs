@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::fmt;
+use std::{collections::HashMap, fmt};
 use std::future::Future;
 use std::hash::Hash;
 use std::num::NonZeroU64;
@@ -199,7 +198,7 @@ impl AuthenticationChallengeResponse {
 }
 
 /// Convert WampPayloadValue into any serde-deserializable object
-pub fn try_from_any_value<'a, T: DeserializeOwned>(
+pub fn try_from_any_value<T: DeserializeOwned>(
     value: WampPayloadValue,
 ) -> Result<T, WampError> {
     serde_json::from_value(value).map_err(|e| {
@@ -210,12 +209,12 @@ pub fn try_from_any_value<'a, T: DeserializeOwned>(
 }
 
 /// Convert WampArgs into any serde-deserializable object
-pub fn try_from_args<'a, T: DeserializeOwned>(value: WampArgs) -> Result<T, WampError> {
+pub fn try_from_args<T: DeserializeOwned>(value: WampArgs) -> Result<T, WampError> {
     try_from_any_value(value.into())
 }
 
 /// Convert WampArgs into any serde-deserializable object
-pub fn try_from_kwargs<'a, T: DeserializeOwned>(value: WampKwArgs) -> Result<T, WampError> {
+pub fn try_from_kwargs<T: DeserializeOwned>(value: WampKwArgs) -> Result<T, WampError> {
     try_from_any_value(value.into())
 }
 

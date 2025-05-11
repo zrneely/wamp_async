@@ -89,15 +89,7 @@ impl HandshakeCtx {
     /// Sets the maximum message size to the next or equal power of two of msg_size
     pub fn set_msg_size(&mut self, msg_size: u32) {
         let req_size: u32 = match msg_size.checked_next_power_of_two() {
-            Some(p) => {
-                if p < MIN_MSG_SZ {
-                    MIN_MSG_SZ
-                } else if p > MAX_MSG_SZ {
-                    MAX_MSG_SZ
-                } else {
-                    p
-                }
-            }
+            Some(p) => p.clamp(MIN_MSG_SZ, MAX_MSG_SZ),
             None => MAX_MSG_SZ,
         };
 
@@ -132,7 +124,7 @@ impl HandshakeCtx {
                 return Err(TransportError::UnexpectedResponse);
             }
 
-            let server_error: u8 = (self.server[1] & 0xF0) >> 4 as u8;
+            let server_error: u8 = (self.server[1] & 0xF0) >> 4;
             return Err(match server_error {
                 1 => TransportError::SerializerNotSupported(self.serializer.to_str().to_string()),
                 2 => TransportError::InvalidMaximumMsgSize(self.msg_size),
@@ -206,15 +198,13 @@ enum SockWrapper {
     Tls(Box<tokio_native_tls::TlsStream<TcpStream>>),
 }
 impl SockWrapper {
-    pub fn close(&mut self) {
+    pub async fn close(&mut self) {
         let sock = match self {
             SockWrapper::Plain(ref mut s) => s,
             SockWrapper::Tls(s) => s.get_mut().get_mut().get_mut(),
         };
 
-        match sock.shutdown() {
-            _ => {}
-        };
+        let _ = sock.shutdown().await;
     }
 }
 
@@ -297,8 +287,7 @@ impl Transport for TcpTransport {
                 }
             };
 
-            payload = Vec::with_capacity(header.payload_len() as usize);
-            unsafe { payload.set_len(header.payload_len() as usize) };
+            payload = vec![0; header.payload_len() as usize];
             self.sock.read_exact(&mut payload).await?;
             trace!("Recv[0x{:X}] : {:?}", payload.len(), payload);
 
@@ -312,7 +301,7 @@ impl Transport for TcpTransport {
     }
 
     async fn close(&mut self) {
-        self.sock.close();
+        self.sock.close().await;
     }
 }
 
@@ -354,7 +343,7 @@ pub async fn connect(
             match e {
                 TransportError::SerializerNotSupported(_) => {
                     warn!("{:?}", e);
-                    stream.close();
+                    stream.close().await;
                     continue;
                 }
                 TransportError::InvalidMaximumMsgSize(_) => {
