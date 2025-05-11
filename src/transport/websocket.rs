@@ -5,7 +5,11 @@ use std::str::FromStr;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
     client_async,
-    tungstenite::{handshake::client::Request, Message},
+    tungstenite::{
+        client::IntoClientRequest,
+        http::{HeaderName, HeaderValue},
+        Message,
+    },
     MaybeTlsStream, WebSocketStream,
 };
 
@@ -98,10 +102,13 @@ pub async fn connect(
     url: &url::Url,
     config: &ClientConfig,
 ) -> Result<(Box<dyn Transport + Send>, SerializerType), TransportError> {
-    let mut request = Request::builder().uri(url.as_ref());
+    let mut request = url.as_ref().into_client_request().unwrap();
 
     if !config.get_agent().is_empty() {
-        request = request.header("User-Agent", config.get_agent());
+        request.headers_mut().insert(
+            "User-Agent",
+            HeaderValue::from_str(config.get_agent()).unwrap(),
+        );
     }
 
     let serializer_list = config
@@ -110,10 +117,16 @@ pub async fn connect(
         .map(|x| x.to_str())
         .collect::<Vec<&str>>()
         .join(",");
-    request = request.header("Sec-WebSocket-Protocol", serializer_list);
+    request.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        HeaderValue::from_str(&serializer_list).unwrap(),
+    );
 
     for (key, value) in config.get_websocket_headers() {
-        request = request.header(key, value);
+        request.headers_mut().insert(
+            HeaderName::from_str(key).unwrap(),
+            HeaderValue::from_str(value).unwrap(),
+        );
     }
 
     let sock = match url.scheme() {
@@ -135,7 +148,7 @@ pub async fn connect(
         _ => panic!("ws::connect called but uri doesnt have websocket scheme"),
     };
 
-    let (client, resp) = match client_async(request.body(()).unwrap(), sock).await {
+    let (client, resp) = match client_async(request, sock).await {
         Ok(v) => v,
         Err(e) => {
             error!("Websocket failed to connect : {:?}", e);
